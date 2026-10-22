@@ -6,25 +6,33 @@ const API_KEY = process.env.API_KEY;
 const WEBHOOK_DOMAIN = process.env.WEBHOOK_DOMAIN; // e.g. my-bot.deno.dev
 const PORT = process.env.PORT || 8000;
 
+if (!API_KEY) console.error("API_KEY is not set");
+
 const bot = new Telegraf(API_KEY);
 
 bot.on("text", async (ctx) => {
   await ctx.reply("Hello There");
 });
 
-async function main() {
-  if (WEBHOOK_DOMAIN) {
-    // Hosted: Telegram pushes updates to us, and the platform sees a listening server
-    const handler = await bot.createWebhook({ domain: WEBHOOK_DOMAIN });
-    http.createServer(handler).listen(PORT, () => {
-      console.log(`Webhook server listening on ${PORT}`);
-    });
-  } else {
-    // Local: long polling
-    bot.launch();
-    process.once("SIGINT", () => bot.stop("SIGINT"));
-    process.once("SIGTERM", () => bot.stop("SIGTERM"));
-  }
-}
+const webhookPath = `/telegraf/${bot.secretPathComponent()}`;
+const webhook = bot.webhookCallback(webhookPath);
 
-main();
+// Start listening right away so the platform's warm-up check passes
+http
+  .createServer((req, res) => {
+    if (req.url === webhookPath) return webhook(req, res);
+    res.end("ok");
+  })
+  .listen(PORT, () => console.log(`Server listening on ${PORT}`));
+
+if (WEBHOOK_DOMAIN) {
+  bot.telegram
+    .setWebhook(`https://${WEBHOOK_DOMAIN}${webhookPath}`)
+    .then(() => console.log(`Webhook set for ${WEBHOOK_DOMAIN}`))
+    .catch((err) => console.error("Failed to set webhook:", err.message));
+} else {
+  console.warn("WEBHOOK_DOMAIN not set, falling back to long polling");
+  bot.launch().catch((err) => console.error("Failed to launch bot:", err.message));
+  process.once("SIGINT", () => bot.stop("SIGINT"));
+  process.once("SIGTERM", () => bot.stop("SIGTERM"));
+}
