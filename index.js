@@ -3,7 +3,7 @@ const { Telegraf } = require("telegraf");
 require("dotenv").config();
 
 const API_KEY = process.env.API_KEY;
-const WEBHOOK_DOMAIN = process.env.WEBHOOK_DOMAIN; // e.g. my-bot.deno.dev
+const WEBHOOK_DOMAIN = process.env.WEBHOOK_DOMAIN; // e.g. https://telegram-bot.alexdev93.deno.net/
 const PORT = process.env.PORT || 8000;
 
 if (!API_KEY) console.error("API_KEY is not set");
@@ -32,7 +32,9 @@ if (WEBHOOK_DOMAIN) {
     .catch((err) => console.error("Failed to set webhook:", err.message));
 } else {
   console.warn("WEBHOOK_DOMAIN not set, falling back to long polling");
-  bot.launch().catch((err) => console.error("Failed to launch bot:", err.message));
+  bot
+    .launch()
+    .catch((err) => console.error("Failed to launch bot:", err.message));
   process.once("SIGINT", () => bot.stop("SIGINT"));
   process.once("SIGTERM", () => bot.stop("SIGTERM"));
 }
