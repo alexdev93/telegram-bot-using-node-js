@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      migrate:
+        description: Apply database migrations using secrets from env-vault
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # The tests use local stand-ins for Telegram and the database, so no secrets are needed
+      - run: npm test
+
+  # Changes the real database, so it runs only when started by hand with "migrate" ticked
+  migrate:
+    needs: test
+    if: github.event_name == 'workflow_dispatch' && inputs.migrate && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency: migrate
+    env:
+      ENV_VAULT_TOKEN: ${{ secrets.ENV_VAULT_TOKEN }}
+      ENV_VAULT_CLIENT: telegram-bot-ci-migrate
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Install envvault
+        run: |
+          curl -fsS https://env-vault-api.alexdev93.workers.dev/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      # Prints variable names only, so a missing key fails here rather than mid-migration
+      - name: Check vault access
+        run: envvault list ma-mech-yet -b main
+      # The script itself wraps the command with `envvault run ma-mech-yet -b main`
+      - run: npm run migrate

@@ -1,18 +1,24 @@
 {
   "name": "bot_using_node",
   "version": "1.0.0",
-  "description": "",
+  "description": "Telegram bot with an authenticated internal OTP delivery API",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node index.js"
+    "start": "envvault run ma-mech-yet -b main -- node index.js",
+    "dev": "envvault run ma-mech-yet -b main -- node --watch index.js",
+    "start:no-vault": "node index.js",
+    "test": "node --test \"test/**/*.test.js\"",
+    "migrate": "envvault run ma-mech-yet -b main -- node scripts/migrate.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
     "dotenv": "^16.1.4",
-    "node-telegram-bot-api": "^0.61.0",
     "telegraf": "^4.12.2"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }
