@@ -11,12 +11,42 @@ function positiveInt(name, fallback) {
   return Number.isInteger(value) && value > 0 ? value : fallback;
 }
 
+// Keeps only the origin. HTTPS is required except for local test servers
+function normalizeOrigin(value) {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value.trim());
+    const local = url.hostname === "localhost" || url.hostname === "127.0.0.1";
+    return url.protocol === "https:" || (local && url.protocol === "http:") ? url.origin : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const authServiceUrl = normalizeOrigin(process.env.AUTH_SERVICE_URL);
+const loginDomains = (process.env.LOGIN_DOMAINS ?? "")
+  .split(",")
+  .map((domain) => normalizeDomain(domain)?.toLowerCase())
+  .filter(Boolean);
+
 const config = {
   // API_KEY is the original name, kept so existing deployments keep working
   apiKey: process.env.TELEGRAM_BOT_TOKEN || process.env.API_KEY,
   webhookDomain: normalizeDomain(process.env.WEBHOOK_DOMAIN),
+  // Sent by Telegram in X-Telegram-Bot-Api-Secret-Token; validated in server.js
+  webhookSecretToken: process.env.WEBHOOK_SECRET_TOKEN?.trim() || undefined,
   port: Number(process.env.PORT) || 8000,
   databaseUrl: process.env.DATABASE_URL,
+
+  // Bot-access events to the auth service, see section 9 of docs/contracts/telegram-otp.v1.md
+  botEvents: {
+    authServiceUrl,
+    clientId: process.env.BOT_EVENTS_CLIENT_ID || "telegram-bot",
+    secret: process.env.BOT_EVENTS_SECRET,
+    // Telegram Login grants from other websites using this bot are ignored
+    loginDomains: loginDomains.length ? loginDomains : authServiceUrl ? [new URL(authServiceUrl).hostname] : [],
+    timeoutMs: positiveInt("BOT_EVENTS_TIMEOUT_MS", 5000),
+  },
 
   // Internal OTP API, see docs/contracts/telegram-otp.v1.md
   internalApi: {

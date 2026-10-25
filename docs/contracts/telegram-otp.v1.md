@@ -2,11 +2,11 @@
 
 | | |
 |---|---|
-| Status | **Proposed.** Built and tested in the bot service against a stub caller. Not yet implemented or approved by the auth service. |
+| Status | **Proposed.** OTP delivery (sections 2–6): built and tested in the bot service against a stub caller, not yet called by the auth service. Bot-access events (section 9): implemented and tested on both sides. |
 | Version | v1 (path prefix `/internal/v1`, signature scheme `v1`) |
-| Provider | Bot service (this repository) |
-| Consumer | Auth service (`next-foundation`) |
-| Last updated | 2026-10-25 |
+| Provider | Bot service (this repository) for OTP delivery; auth service for bot-access events |
+| Consumer | Auth service (`next-foundation`) for OTP delivery; bot service for bot-access events |
+| Last updated | 2026-10-26 |
 
 Breaking changes get a new version (`/internal/v2`, signature `v2`). Both repositories should keep a copy of this file at the same version.
 
@@ -174,13 +174,76 @@ Suggested retention: delete rows older than 30 days (`DELETE FROM otp_deliveries
 State on 2026-10-25: no committed branch has any of this. Uncommitted work in progress in `next-foundation` adds Telegram OIDC login, Neon PostgreSQL with Drizzle, and a `telegram_identities` table with `telegram_user_id` (text, unique) and `bot_access_granted`. That covers items 1 and 2 in shape. Items 3–5 are not started.
 
 1. **Telegram login and identity link** *(in progress)*. Store a verified Telegram user id per user, taken from the verified login response and never from client input. Send it as `telegramUserId`.
-2. **Bot-messaging eligibility** *(in progress: `bot_access_granted`)*. Set it only from what the Telegram login flow actually returns (to be confirmed against the official docs). Only call this API when it is true. On `recipient_unavailable`, prompt the user to start the bot.
+2. **Bot-messaging eligibility** *(done: section 9)*. The login response can't prove it (see section 8), so the auth service sets `bot_access_granted` from the bot-access events in section 9. Only call this API when it is true. On `recipient_unavailable`, prompt the user to open the bot and press Start.
 3. **OTP challenges.** Generate the code with a CSPRNG and an opaque `challengeId`. Store only a hash of the code. Enforce expiry and verification-attempt limits.
 4. **Server-only client.** Call this endpoint from server code (`server/integrations/…`) with the signing helper above. Read `BOT_SERVICE_URL`, `BOT_SERVICE_CLIENT_ID` and `BOT_SERVICE_CLIENT_SECRET` through `src/server/config/env.ts`. Use a ~20 s timeout and HTTPS only.
 5. **Error handling** as in section 3. Never forward Telegram details to the browser.
 
 ## 8. Open questions
 
-- Exact fields and scopes of the Telegram login response that prove bot write access.
+- ~~Exact fields and scopes of the Telegram login response that prove bot write access.~~ **Answered 2026-10-26: none do.** Telegram's token response leaves `telegram:bot_access` out of `scope` even when the user granted it (seen in production, while the bot chat showed "You allowed this bot to message you when you logged in on ma-mech-yet.vercel.app"). The proof goes to the bot instead: a private-chat message with `connected_website` set to the login domain. tdlib/telegram-bot-api (`Client.cpp`) maps `messageBotWriteAccessAllowed` with reason `botWriteAccessAllowReasonConnectedWebsite` to that field. The Bot API server drops updates older than 24 hours, so the bot must not be down longer than that. Section 9 forwards these signals.
 - Whether the bot service runs on Deno Deploy long term (affects PostgreSQL connectivity and whether in-memory rate limits are per isolate).
 - Rate limits are per instance. With several instances, effective limits multiply. A shared limiter would need Postgres or Redis.
+
+## 9. Bot-access events (bot service → auth service)
+
+Telegram tells only the bot whether it may message a user, so the bot reports it. The auth service owns the resulting state (`telegram_identities.bot_access_granted`).
+
+```
+POST {AUTH_SERVICE_URL}/api/internal/v1/telegram/bot-access
+Content-Type: application/json
+```
+
+Headers and signature are exactly as in section 2, in the other direction: the bot signs with `BOT_EVENTS_CLIENT_ID` (default `telegram-bot`) and `BOT_EVENTS_SECRET`, and `PATH` is `/api/internal/v1/telegram/bot-access`. The auth service accepts `BOT_EVENTS_SECRET` and, while rotating, `BOT_EVENTS_SECRET_PREVIOUS`. The secret is its own value of at least 32 characters, never shared with another credential.
+
+### Events
+
+| Telegram update | `status` | `source` |
+|---|---|---|
+| Private-chat message with `connected_website` equal to one of `LOGIN_DOMAINS` (default: the host of `AUTH_SERVICE_URL`) | `granted` | `website_login` |
+| `/start` in a private chat | `granted` | `start` |
+| `my_chat_member`, private chat, new status `kicked` (user blocked the bot) | `revoked` | `blocked` |
+| `my_chat_member`, private chat, new status `member` (user unblocked the bot) | `granted` | `unblocked` |
+
+Logins on other websites that use the same bot are ignored.
+
+### Request body
+
+Max 4096 bytes. Unknown fields are rejected.
+
+```json
+{
+  "eventId": "tg-8978245878-731220145",
+  "telegramUserId": "123456789",
+  "status": "granted",
+  "source": "website_login",
+  "occurredAt": "2026-10-25T20:44:31.000Z"
+}
+```
+
+| Field | Rules |
+|---|---|
+| `eventId` | `[A-Za-z0-9_-]{1,128}`. `tg-{botId}-{update_id}`, stable across webhook retries. **This is the idempotency key** |
+| `telegramUserId` | Decimal **string**, a positive safe integer: the Telegram user the update came from |
+| `status` | `granted` or `revoked` |
+| `source` | `website_login`, `start`, `unblocked` or `blocked` |
+| `occurredAt` | ISO-8601 with a timezone. The Telegram update's `date` |
+
+### Responses
+
+| HTTP | Body | Meaning |
+|---|---|---|
+| 200 | `{ "requestId", "eventId", "duplicate": bool, "applied": bool }` | Stored. `applied: false` means no account has this Telegram user yet; the event is applied when they sign in |
+| 400 | `error.code: "invalid_request"`, `error.details: [{field, issue}]` | Malformed body. Not retried |
+| 401 | `error.code: "unauthorized"` | Bad or missing signature, unknown client or clock skew. Not retried |
+| 413 / 415 | `payload_too_large` / `unsupported_media_type` | Not retried |
+| 503 | `error.code: "not_configured"` | The auth service has no `BOT_EVENTS_SECRET`. Retried |
+| 500 | `error.code: "internal_error"` | Retried with the same body |
+
+The bot retries 429, 5xx, timeouts and network errors up to 3 times (backoff from 250 ms, `Retry-After` up to 5 s), never throws, and never logs the Telegram user id.
+
+### Ordering and races
+
+- A repeated `eventId` is stored once and answered with `duplicate: true`.
+- The newest `occurredAt` wins: an older event never overwrites a newer state.
+- The grant can arrive before the login callback has created the account (consent and redirect happen within seconds). The auth service keeps every event and applies the newest one when the account is created or signs in again.
